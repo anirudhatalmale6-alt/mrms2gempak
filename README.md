@@ -37,7 +37,7 @@ field. Parameter numbers, read off real files in the bucket on 2026-09-10:
 | `MultiSensor_QPE_24H_Pass1` | 34 | `QA24` |
 | `RadarOnly_QPE_24H` | 6 | `QR24` |
 
-Two ways round it, both supported — see §5.
+Two ways round it, both supported — see §6.
 
 ### 1.2 The grid is too big, and it is the wrong grid
 
@@ -98,7 +98,47 @@ bucket and the scripts read it over plain anonymous HTTPS.
 
 ---
 
-## 3. Quick start
+## 3. Straight conversion, no NBM involved
+
+If you would rather get MRMS into GEMPAK first and deal with remapping yourself,
+skip the template entirely:
+
+```bash
+python3 mrms2gem.py --duration 24H --valid 2026-09-09T12 \
+                    --native --clip=-105:-90:35:45 \
+                    --gemfile ~/mrms_{dur}_%Y%m%d.gem
+```
+
+No interpolation, no NBM file, no `ipolates` — MRMS stays on its own 0.01°
+lat/lon grid and only gets cut down to the box you asked for.
+
+**The clip is not optional here, and that is the one real constraint.** Full
+CONUS native is 24,500,000 points, far past the grid size any stock GEMPAK is
+built for (`LLMXGD` in `GEMPRM.PRM`, fixed at compile time). If you cannot
+rebuild GEMPAK, a box is the only way to keep native resolution. The script warns
+before it wastes a download.
+
+At 0.01° the arithmetic is easy — degrees × 100 per side:
+
+| box | points |
+| --- | --- |
+| 10° × 5° | 500,000 |
+| 15° × 10° | 1,500,000 |
+| 20° × 15° | 3,000,000 |
+| 30° × 20° | 6,000,000 |
+
+To find what your build actually allows:
+
+```bash
+grep LLMXGD $GEMINC/GEMPRM.PRM
+```
+
+Note `--clip=-105:-90:35:45` with the **equals sign**. A value starting with `-`
+looks like an option to the argument parser; the script rewrites the spaced form
+for you, but the joined form is the habit worth having. Longitudes may be given
+either as −105 or as 255.
+
+## 4. Quick start
 
 ```bash
 # what is on S3 for a day — downloads nothing
@@ -134,7 +174,7 @@ Per run you get one line per file:
 ```
 
 The numbers are there to be read, not decoration. `masked` is how many points
-were sentinels (§4); the mean moving 1.686 → 1.994 mm is those sentinels no
+were sentinels (§5); the mean moving 1.686 → 1.994 mm is those sentinels no
 longer dragging the average down. A run that masked 0 points on a CONUS file
 means the mask did not fire, and the script stops rather than hand you a grid
 with negative rainfall in it.
@@ -150,11 +190,13 @@ with negative rainfall in it.
 | `--tolerance` | `30` | minutes either side of the requested time to accept |
 | `--grid-template` | — | GRIB2 file whose grid to copy (one of your NBM files) |
 | `--grid` | — | explicit wgrib2 `-new_grid` spec instead of a template |
-| `--native` | off | no regridding. Will almost certainly blow GEMPAK's grid limit |
+| `--native` | off | no regridding — use with `--clip`, see §3 |
 | `--interp` | `budget` | `budget` for accumulations; `neighbor` to keep exact values |
-| `--clip` | `auto` | trim MRMS to the target's bounding box first, purely for speed |
-| `--retag` | `apcp-acc` | see §5 |
+| `--clip` | `auto` | `lonW:lonE:latS:latN`. Required size control with `--native`; only a speed-up when regridding |
+| `--retag` | `apcp-acc` | see §6 |
 | `--maxgrd` | `2000` | `nagrib2` MAXGRD |
+| `--gemenviron` | — | path to `Gemenviron.profile`; `nagrib2` is run in a shell that sources it |
+| `--show-deck` | off | print the `nagrib2` input deck |
 | `--overwrite-gem` | off | `OVERWR=YES`: replaces matching grids |
 | `--no-gempak` | off | stop after GRIB2 |
 | `--keep-grib` | off | keep the regridded GRIB2 |
@@ -165,9 +207,35 @@ are not the bounding box) and trims MRMS to it before interpolating. For the ful
 NBM CONUS grid the box is wider than MRMS at both ends, so the script says so and
 skips the clip instead of doing a pointless pass. It pays off for regional runs.
 
+### If your GEMPAK environment is awkward
+
+A GEMPAK that only works in a shell where you have sourced its environment will
+fail here with something unhelpful about tables or `$GEMTBL`. Two ways out:
+
+```bash
+# let the script source it for you before calling nagrib2
+python3 mrms2gem.py ... --gemenviron $NAWIPS/Gemenviron.profile
+
+# or see the deck and run the GEMPAK step yourself
+python3 mrms2gem.py ... --show-deck
+```
+
+With `--gemenviron` the script does not insist on finding `nagrib2` up front —
+that is the whole point, since it only becomes visible after sourcing.
+
+Either way, **any** `nagrib2` failure prints the full input deck and the path of
+the GRIB2 file that is already converted and waiting. Worst case the script's job
+is "hand me a GEMPAK-ready GRIB2" and you drive `nagrib2` yourself; a fighting
+GEMPAK environment does not put the rest of the work out of reach.
+
+`nagrib2` can exit 0 having written nothing — a navigation mismatch or a
+parameter it cannot name both do that quietly. The script stats the output file
+before and after and treats "exited cleanly but did not change the file" as a
+failure, because otherwise an empty append reads as success.
+
 ---
 
-## 4. The sentinel values — why this is not optional
+## 5. The sentinel values — why this is not optional
 
 MRMS encodes **−3 as "outside radar coverage"** and **−999 as "missing"**. They
 are ordinary values in the file, not flagged missing:
@@ -198,7 +266,7 @@ check the exit status.
 
 ---
 
-## 5. Making GEMPAK recognise the parameter
+## 6. Making GEMPAK recognise the parameter
 
 `--retag` picks between three approaches. Default is `apcp-acc`.
 
@@ -271,7 +339,7 @@ vertical coordinate table. Empty slots keep the defaults.
 
 ---
 
-## 6. Doing the maths in GEMPAK
+## 7. Doing the maths in GEMPAK
 
 The reliable route is **both grids in one `.gem` file**, which is exactly what the
 matching navigation buys you. Point `--gemfile` at a *copy* of your NBM file:
@@ -310,7 +378,7 @@ needed.
 
 ---
 
-## 7. Files
+## 8. Files
 
 | file | what it does |
 | --- | --- |
@@ -331,7 +399,7 @@ python3 wgrib2_caps.py wgrib2 sample_mrms.grib2
 
 ---
 
-## 8. What is verified, and what is not
+## 9. What is verified, and what is not
 
 Verified by running it, against real files from the bucket:
 
@@ -346,8 +414,17 @@ Verified by running it, against real files from the bucket:
 * `grid_spec.py` against a real NBM CONUS file — its output matches wgrib2's own
   `-grid` report field for field
 * `--clip` with `-small_grib`, and the `auto` box derivation
+* the straight-conversion path of §3: `--native --clip=-105:-90:35:45` cuts
+  1,500,000 points out of CONUS at native resolution, no interpolation involved
+* `--clip` validation: a reversed box, a box outside the MRMS domain, and a
+  spaced negative longitude (`--clip -105:-90:35:45`) are all handled
 * `make_mrms_table.py` against two deliberately different table layouts,
   including the read-back check catching a mis-aligned column
+* the GEMPAK stage against a stand-in `nagrib2`: `--gemenviron` really does
+  source the environment (and the same run without it really does not — both
+  directions checked), sourcing noise stays out of the reported output, and a
+  `nagrib2` that exits 0 without touching the file is caught rather than
+  reported as success
 
 **Not yet run end to end here:**
 
@@ -355,7 +432,8 @@ Verified by running it, against real files from the bucket:
   available, so it reports `interpolation package is not installed`. The command
   is assembled and the guard that detects this is tested; the interpolation needs
   a wgrib2 that has `ipolates`.
-* the `nagrib2` stage, for the obvious reason that GEMPAK is not installed here.
+* the **real** `nagrib2`, for the obvious reason that GEMPAK is not installed
+  here. The stand-in above exercises the plumbing around it, not GEMPAK itself.
 
 So the first run on your machine is the one that settles the GEMPAK half — which
 `--retag` mode gives the grid name you want, and whether `MAXGRD` and the
