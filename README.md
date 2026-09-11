@@ -77,7 +77,8 @@ sampling a single point, which is what you want going from ~1 km to 2.5 km.
 | what | why | check |
 | --- | --- | --- |
 | python3 ≥ 3.9 | the scripts. **Standard library only** — no boto3, no numpy, no aws CLI | `python3 -V` |
-| wgrib2, **built with interpolation** | masking, re-tagging, `-new_grid` | `wgrib2 -config \| grep -i interpolation` |
+| wgrib2 | masking, re-tagging, clipping | `wgrib2 --version` |
+| …**built with interpolation** | only for `-new_grid`, i.e. regridding | `wgrib2 -config \| grep -i interpolation` |
 | GEMPAK 7.x (`nagrib2` on `PATH`) | the `.gem` stage only | `which nagrib2` |
 
 The wgrib2 check matters. `-new_grid` needs the `ipolates` library, which needs a
@@ -95,6 +96,36 @@ installed and `USE_IPOLATES=3` in the makefile.
 
 No AWS credentials are needed anywhere. `noaa-mrms-pds` is a public Open Data
 bucket and the scripts read it over plain anonymous HTTPS.
+
+### Older wgrib2 builds
+
+wgrib2 has gained options over the years and a build that lacks one stops dead
+with `*** FATAL ERROR: unknown option -set_ftime_mode ***` — it does not warn and
+carry on, so one missing option converts nothing. Rather than require a
+particular version, `mrms2gem.py` asks your binary what it has, reports it, and
+assembles the command from what is there:
+
+```
+[mrms2gem] wgrib2: v3.1.3 10/2023 Wesley Ebisuzaki
+[mrms2gem] wgrib2 does not have: -set_ftime_mode -- working around where possible
+```
+
+What each missing option costs:
+
+| missing | consequence |
+| --- | --- |
+| `-set_ftime_mode` | time code may read `0-1 day` instead of `0-24 hour`; data unaffected |
+| `-set_grib_type` | output GRIB2 is uncompressed, so larger (4.6 MB → 37 MB for CONUS) |
+| `-set_lev` | level stays as MRMS wrote it rather than being set to surface |
+| `-set_ftime2`/`-set_ftime` | cannot build an accumulation record → falls back to `--retag apcp` |
+| `-set_date` | **blocks** `--retag apcp-acc` rather than working around it: without the reference-time shift every grid would be dated N hours late |
+| `-set` | cannot re-tag at all → falls back to `--retag none` + parameter table |
+| `-undefine_val` | falls back to `-rpn dup:-0.001:>=:mask`, proven on the file before use |
+| `-small_grib` | **fatal** — no way to cut the grid down to a size GEMPAK accepts |
+
+Every downgrade is logged with its reason. The one deliberate refusal is
+`-set_date`: a wrong date on every grid is worse than a missing accumulation tag,
+so that case loses the tag instead of the date.
 
 ---
 
@@ -420,6 +451,12 @@ Verified by running it, against real files from the bucket:
   spaced negative longitude (`--clip -105:-90:35:45`) are all handled
 * `make_mrms_table.py` against two deliberately different table layouts,
   including the read-back check catching a mis-aligned column
+* the older-wgrib2 handling, against a stand-in that rejects named options the
+  same way a build without them does: each of `-set_ftime_mode`, `-set_ftime2`,
+  `-set_ftime`, `-set_date`, `-set`, `-set_lev`, `-set_grib_type` and
+  `-undefine_val` removed in turn, and several at once
+* the `-rpn dup:-0.001:>=:mask` fallback, which flags the same 1,512,918 points
+  and reaches the same minimum as `-undefine_val` on a real CONUS file
 * the GEMPAK stage against a stand-in `nagrib2`: `--gemenviron` really does
   source the environment (and the same run without it really does not — both
   directions checked), sourcing noise stays out of the reported output, and a

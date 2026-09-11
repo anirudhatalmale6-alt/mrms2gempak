@@ -57,6 +57,7 @@ import textwrap
 
 import grid_spec
 import mrms_s3
+import wgrib2_caps
 
 # MRMS sentinels: -3 means "outside radar coverage", -999 means "missing".
 # Everything below this threshold is turned into GRIB2 missing data.
@@ -225,7 +226,62 @@ def field_stats(wgrib2: str, path: str) -> dict:
 # --------------------------------------------------------------------------- #
 # the GRIB2 stage
 # --------------------------------------------------------------------------- #
-def retag_args(mode: str, hours: int) -> list[str]:
+#: wgrib2 options this script would like to use.  Not every build has all of
+#: them -- older wgrib2 predates several -- so the capabilities are probed once
+#: and the command is assembled from what is actually there.
+WANTED_OPTIONS = ("-set", "-set_lev", "-set_date", "-set_ftime2", "-set_ftime",
+                  "-set_ftime_mode", "-set_grib_type", "-undefine_val",
+                  "-small_grib", "-new_grid")
+
+
+def probe_capabilities(wgrib2: str) -> dict[str, bool]:
+    """Ask the wgrib2 binary which of the options we want it actually has."""
+    caps = {opt: wgrib2_caps.supports(wgrib2, opt) for opt in WANTED_OPTIONS}
+    missing = [opt for opt, ok in caps.items() if not ok]
+    log(f"wgrib2: {wgrib2_caps.version(wgrib2).split(',')[0]}")
+    if missing:
+        log("wgrib2 does not have: " + " ".join(missing)
+            + " -- working around where possible")
+    return caps
+
+
+def resolve_retag(mode: str, caps: dict[str, bool]) -> str:
+    """
+    Downgrade the re-tagging mode to what this wgrib2 can actually do, loudly.
+
+    Silently producing a differently-tagged record than asked for would send us
+    chasing the wrong thing in GEMPAK later, so every downgrade is logged with
+    the reason and what it means.
+    """
+    if mode == "none":
+        return mode
+    if not caps["-set"]:
+        log("WARNING: this wgrib2 has no -set, so the record cannot be re-tagged "
+            "as APCP at all.  Falling back to --retag none: the MRMS identifiers "
+            "are kept and GEMPAK needs the parameter table "
+            "(see make_mrms_table.py in the README).")
+        return "none"
+    if mode == "apcp-acc" and not (caps["-set_ftime2"] or caps["-set_ftime"]):
+        log("WARNING: this wgrib2 has neither -set_ftime2 nor -set_ftime, so the "
+            "record cannot be turned into an N-hour accumulation.  Falling back to "
+            "--retag apcp: still APCP at the surface, but tagged as an analysis at "
+            "its valid time rather than an accumulation, so GEMPAK will not name it "
+            "P06M/P12M/P24M.")
+        return "apcp"
+    if mode == "apcp-acc" and not caps["-set_date"]:
+        # Without the reference-time shift an "0-N hour acc" record claims to be
+        # valid N hours in the future.  That is a wrong date on every grid, which
+        # is worse than not having the accumulation tag at all, so refuse it
+        # rather than work around it.
+        log("WARNING: this wgrib2 has no -set_date, so the reference time cannot be "
+            "shifted back.  An accumulation record without that shift would be dated "
+            f"N hours too late on every file.  Falling back to --retag apcp, which "
+            "keeps the correct valid time.")
+        return "apcp"
+    return mode
+
+
+def retag_args(mode: str, hours: int, caps: dict[str, bool] | None = None) -> list[str]:
     """
     GEMPAK's shipped GRIB2 tables have no entry for MRMS: the records carry
     discipline 209, centre 161, local table 1, category 6, parameter 41, and
@@ -246,6 +302,7 @@ def retag_args(mode: str, hours: int) -> list[str]:
     N hours, which is why apcp-acc shifts the reference time back by N hours --
     without that shift the record would claim to be valid N hours in the future.
     """
+    caps = caps or {opt: True for opt in WANTED_OPTIONS}
     if mode == "none":
         return []
     args = [
@@ -255,38 +312,95 @@ def retag_args(mode: str, hours: int) -> list[str]:
         "-set", "local_table", "1",
         "-set", "table_4.1", "1",
         "-set", "table_4.2", "8",
-        "-set_lev", "surface",
     ]
+    if caps["-set_lev"]:
+        args += ["-set_lev", "surface"]
     if mode == "apcp-acc":
-        args += [
-            "-set", "table_1.2", "1",          # reference time = start of forecast
-            "-set_date", f"-{hours}hr",
-            "-set_ftime2", f"0-{hours} hour acc fcst",
-        ]
+        # resolve_retag() has already guaranteed -set_date and one of the ftime
+        # options exist by the time this mode survives; -set_ftime2 is the modern
+        # spelling and -set_ftime the older one, taking the same string.
+        args += ["-set", "table_1.2", "1"]     # reference time = start of forecast
+        args += ["-set_date", f"-{hours}hr"]
+        args += ["-set_ftime2" if caps["-set_ftime2"] else "-set_ftime",
+                 f"0-{hours} hour acc fcst"]
+    return args
+
+
+_MASK_ARGS_CACHE: dict[str, list[str]] = {}
+
+
+def mask_args(wgrib2: str, caps: dict[str, bool], probe_sample: str) -> list[str]:
+    """
+    The wgrib2 arguments that turn MRMS sentinels into missing data.
+
+    `-undefine_val low:high` is the clean way and exists in current wgrib2.  An
+    older build without it falls back to -rpn, and the fallback has to
+    demonstrably work on a real file before it is accepted -- see
+    wgrib2_caps.probe_mask.  If nothing works we stop, because averaging or
+    interpolating unmasked -3s produces negative rainfall.
+
+    `probe_sample` must be the FULL CONUS download, not a clipped subset: the
+    proof that a mask fired is that the undefined count went up, and a clipped
+    box over well-covered land legitimately contains no sentinels to mask.  The
+    probe result is cached, since each attempt rewrites a 24.5M-point grid.
+    """
+    if caps["-undefine_val"]:
+        return ["-undefine_val", f"-1e30:{SENTINEL_THRESHOLD}"]
+    if wgrib2 in _MASK_ARGS_CACHE:
+        return _MASK_ARGS_CACHE[wgrib2]
+
+    log("this wgrib2 has no -undefine_val; working out an older way to mask the sentinels")
+    if field_stats(wgrib2, probe_sample)["min"] >= SENTINEL_THRESHOLD:
+        # Nothing in this file to mask, so the mask cannot be proven on it -- and
+        # equally cannot do any harm.  The per-file check after conversion still
+        # enforces that no negative values survive.
+        args = [a.format(lo=SENTINEL_THRESHOLD) for a in wgrib2_caps.MASK_CANDIDATES[1][1]]
+        log(f"  WARNING: {os.path.basename(probe_sample)} contains no sentinel values, "
+            f"so the fallback mask could not be proven on it.  Using {' '.join(args)} "
+            "unverified; the per-file check still rejects any negative output.")
+    else:
+        args = wgrib2_caps.probe_mask(wgrib2, probe_sample, threshold=SENTINEL_THRESHOLD)
+        log("  using: " + " ".join(args) + " (verified on this file)")
+    _MASK_ARGS_CACHE[wgrib2] = args
     return args
 
 
 def convert_grib(wgrib2: str, src: str, dst: str, new_grid: list[str] | None,
                  interp: str, retag: str, hours: int, clip: str | None,
+                 caps: dict[str, bool] | None = None,
                  grib_type: str = "c3") -> dict:
     """
     Mask sentinels, optionally clip, optionally regrid, write `dst`.
 
     Returns the before/after statistics so the caller can prove the mask and the
-    interpolation actually did something.  `-set_ftime_mode 1` keeps wgrib2 from
-    rewriting "0-24 hour" as "0-1 day", which would change the name GEMPAK gives
-    the grid.
+    interpolation actually did something.
+
+    Every wgrib2 option used here is checked against `caps` first.  `caps` comes
+    from probe_capabilities(), because older wgrib2 builds are missing several of
+    these and a missing option is a fatal error, not a warning -- an old build
+    stops at the first one it does not recognise with "unknown option" and nothing
+    gets converted at all.
     """
+    caps = caps or {opt: True for opt in WANTED_OPTIONS}
     work = src
     tmp_clip = None
     if clip:
-        # Trim the source to a lat/lon box before interpolating.  Pure speed:
+        if not caps["-small_grib"]:
+            raise RuntimeError(
+                "this wgrib2 has no -small_grib, so it cannot cut a box out of the "
+                "MRMS grid.  Without a box the native grid is 24,500,000 points, "
+                "which GEMPAK will not take -- a newer wgrib2 is needed here."
+            )
+        # Trim the source to a lat/lon box.  With --native this is what keeps the
+        # grid inside GEMPAK's limit; when regridding it is only a speed-up, since
         # budget interpolation over all 24.5M MRMS points is the slow part.
         lon_w, lon_e, lat_s, lat_n = [float(v) for v in clip.split(":")]
         tmp_clip = dst + ".clip.grib2"
-        run([wgrib2, src, "-set_grib_type", "same",
-             "-small_grib", f"{lon_w}:{lon_e}", f"{lat_s}:{lat_n}", tmp_clip],
-            "wgrib2 -small_grib")
+        clip_cmd = [wgrib2, src]
+        if caps["-set_grib_type"]:
+            clip_cmd += ["-set_grib_type", "same"]
+        clip_cmd += ["-small_grib", f"{lon_w}:{lon_e}", f"{lat_s}:{lat_n}", tmp_clip]
+        run(clip_cmd, "wgrib2 -small_grib")
         work = tmp_clip
 
     # Read the "before" numbers from whatever is actually going into the
@@ -295,10 +409,20 @@ def convert_grib(wgrib2: str, src: str, dst: str, new_grid: list[str] | None,
     # in it, and the mask check below would fail a perfectly good file.
     before = field_stats(wgrib2, work)
 
-    cmd = [wgrib2, "-set_ftime_mode", "1", work,
-           "-undefine_val", f"-1e30:{SENTINEL_THRESHOLD}"]
-    cmd += retag_args(retag, hours)
-    cmd += ["-set_grib_type", grib_type]
+    cmd = [wgrib2]
+    if caps["-set_ftime_mode"]:
+        # Stops wgrib2 rewriting "0-24 hour acc" as "0-1 day acc", which would
+        # change the name GEMPAK derives for the grid.  It is an init option, so
+        # it has to come before the input file.  Builds without it still produce
+        # correct data, just possibly a "1 day" time code -- see the note logged
+        # by probe_capabilities().
+        cmd += ["-set_ftime_mode", "1"]
+    cmd += [work]
+    # Probe against `src`, the full CONUS download, not the clipped `work`.
+    cmd += mask_args(wgrib2, caps, src)
+    cmd += retag_args(retag, hours, caps)
+    if caps["-set_grib_type"]:
+        cmd += ["-set_grib_type", grib_type]
     if new_grid:
         cmd += ["-new_grid_winds", "earth",
                 "-new_grid_interpolation", interp,
@@ -590,9 +714,13 @@ def main(argv: list[str] | None = None) -> int:
     wgrib2 = None
     new_grid = None
     clip = None
+    caps: dict[str, bool] = {}
+    retag = args.retag
     if not args.list_only:
         wgrib2 = find_exe(args.wgrib2 or "wgrib2", "WGRIB2",
                           "Install the wgrib2 package or set WGRIB2=/path/to/wgrib2.")
+        caps = probe_capabilities(wgrib2)
+        retag = resolve_retag(args.retag, caps)
         if args.grid:
             new_grid = args.grid.split()
             if len(new_grid) != 3:
@@ -689,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.workdir, f"{product}_{stamp:%Y%m%d-%H%M%S}_{'native' if args.native else 'target'}.grib2")
                 stats = convert_grib(wgrib2, raw, regridded,
                                      None if args.native else new_grid,
-                                     args.interp, args.retag, hours, clip)
+                                     args.interp, retag, hours, clip, caps)
                 b, a = stats["before"], stats["after"]
                 log(f"OK    {tag}: {int(b['ndata']):,} pts -> {int(a['ndata']):,} pts, "
                     f"masked {int(a['undef']):,}, mean {b['mean']:.3f} -> {a['mean']:.3f} mm, "

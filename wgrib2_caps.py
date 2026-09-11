@@ -39,11 +39,16 @@ CACHE = os.path.join(os.path.expanduser("~"), ".cache", "mrms2gem", "caps.json")
 # with the threshold: every value below it becomes undefined.  Ordered most
 # modern / most explicit first.
 MASK_CANDIDATES: list[tuple[str, list[str]]] = [
-    # Verified working on wgrib2 v3.1.3: "-undefine_val X" takes val or low:high.
+    # Both of these are verified against wgrib2 v3.1.3 on a real MRMS file: each
+    # flags the same 1,512,918 points and brings the minimum from -3 back to 0.
+    #
+    # "-undefine_val X" takes a value or a low:high range, and is the clean way.
     ("undefine_val_range", ["-undefine_val", "-1e30:{lo}"]),
-    # Fallbacks for builds that predate it.
-    ("rpn_mask", ["-rpn", "sto_1:{lo}:lt:mask:rcl_1:swap:merge"]),
-    ("rpn_mask_simple", ["-rpn", "{lo}:lt:mask"]),
+    # For builds predating it, rpn can do the same thing.  wgrib2's rpn spells its
+    # comparisons ">=", "<" etc -- NOT "ge"/"lt" -- and its "mask" operator pops a
+    # flag grid and undefines the value below it wherever that flag is 0.  So:
+    # dup the field, compare against the threshold to get a keep/drop flag, mask.
+    ("rpn_mask", ["-rpn", "dup:{lo}:>=:mask"]),
 ]
 
 
@@ -76,11 +81,39 @@ def version(wgrib2: str) -> str:
     return out.splitlines()[0] if out else "unknown"
 
 
+_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def supports(wgrib2: str, option: str) -> bool:
+    """
+    True if this wgrib2 build knows `option`.
+
+    Asks wgrib2 itself by invoking the option with no input file.  Argument
+    parsing happens before the input file is looked for, so an option this build
+    does not have produces
+
+        *** FATAL ERROR: unknown option -set_ftime_mode ***
+
+    while one it does have gets as far as "no input file defined".  That wording
+    is stable across wgrib2 versions, which is what makes this usable for
+    deciding what an OLDER build than the one here can do -- reading `-help all`
+    would not work, since old builds do not all support it.
+    """
+    key = (wgrib2, option)
+    if key in _SUPPORT_CACHE:
+        return _SUPPORT_CACHE[key]
+    # A dummy argument keeps options that expect one from erroring on the arg
+    # rather than being reported as unknown.
+    proc = run([wgrib2, option, "0"], check=False)
+    text = (proc.stdout + proc.stderr).lower()
+    ok = "unknown option" not in text
+    _SUPPORT_CACHE[key] = ok
+    return ok
+
+
 def has_option(wgrib2: str, option: str) -> bool:
-    """True if this build lists `option` in its own -help output."""
-    out = run([wgrib2, "-help", option.lstrip("-")], check=False)
-    text = (out.stdout + out.stderr)
-    return option in text and "not found" not in text.lower()
+    """Kept for the standalone report below; `supports` is the one to use."""
+    return supports(wgrib2, option)
 
 
 def has_interpolation(wgrib2: str) -> bool:
