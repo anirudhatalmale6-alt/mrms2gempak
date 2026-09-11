@@ -54,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 
 import grid_spec
 import mrms_s3
@@ -460,24 +461,29 @@ def convert_grib(wgrib2: str, src: str, dst: str, new_grid: list[str] | None,
 # --------------------------------------------------------------------------- #
 # the GEMPAK stage
 # --------------------------------------------------------------------------- #
+# Written with the full words "run" and "exit" rather than the "r"/"e"
+# abbreviations, and with no leading whitespace, which is how Unidata's own GEMPAK
+# driver scripts do it.  The blank line after "run" answers the prompt GEMPAK
+# redisplays when the run finishes; "exit" then ends the program rather than
+# leaving it sitting at that prompt waiting for input that will never come.
 NAGRIB2_TEMPLATE = """\
- GBFILE   = {gbfile}
- INDXFL   =
- GDOUTF   = {gdoutf}
- PROJ     =
- GRDAREA  =
- KXKY     =
- MAXGRD   = {maxgrd}
- CPYFIL   = gds
- GAREA    = grid
- OUTPUT   = T
- G2TBLS   = {g2tbls}
- G2DIAG   =
- OVERWR   = {overwr}
- PDSEXT   = NO
- r
+GBFILE   = {gbfile}
+INDXFL   =
+GDOUTF   = {gdoutf}
+PROJ     =
+GRDAREA  =
+KXKY     =
+MAXGRD   = {maxgrd}
+CPYFIL   = gds
+GAREA    = grid
+OUTPUT   = T
+G2TBLS   = {g2tbls}
+G2DIAG   =
+OVERWR   = {overwr}
+PDSEXT   = NO
+run
 
- e
+exit
 """
 
 
@@ -492,7 +498,8 @@ def nagrib2_deck(grib: str, gemfile: str, maxgrd: int, g2tbls: str = "",
 
 def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
                 g2tbls: str = "", overwrite: bool = False,
-                gemenviron: str | None = None, show_deck: bool = False) -> str:
+                gemenviron: str | None = None, show_deck: bool = False,
+                timeout: float = 180.0) -> str:
     """
     Drive nagrib2 non-interactively.
 
@@ -513,6 +520,16 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
     not make that work unreachable.
     """
     script = nagrib2_deck(grib, gemfile, maxgrd, g2tbls, overwrite)
+    # Always leave the deck on disk next to the GRIB2.  If anything goes wrong with
+    # GEMPAK the useful next step is "nagrib2 < thatfile" in a shell where GEMPAK
+    # works, and retyping fifteen lines from an error message is nobody's idea of
+    # a good time.
+    deck_path = grib + ".nagrib2.deck"
+    try:
+        with open(deck_path, "w") as fh:
+            fh.write(script)
+    except OSError:
+        deck_path = ""
     if show_deck:
         log("nagrib2 input deck:\n" + script)
 
@@ -529,8 +546,48 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
     else:
         cmd = [nagrib2]
 
-    proc = subprocess.run(cmd, input=script, capture_output=True, text=True)
-    text = (proc.stdout + proc.stderr).strip()
+    # Stream nagrib2's output as it arrives rather than capturing it silently.
+    # GEMPAK programs are interactive: if one stops to ask something the deck does
+    # not answer, a captured-output run looks like a hang with nothing on screen
+    # and no way to tell what it is waiting for.  Echoing every line means the
+    # last thing printed is the question it is stuck on.
+    lines: list[str] = []
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    assert proc.stdin and proc.stdout
+    try:
+        proc.stdin.write(script)
+        proc.stdin.close()          # EOF, so nagrib2 knows there is no more input
+    except BrokenPipeError:
+        pass                        # it exited before reading the deck; output says why
+
+    killed: list[bool] = []
+
+    def give_up() -> None:
+        killed.append(True)
+        proc.kill()
+
+    timer = threading.Timer(timeout, give_up)
+    timer.start()
+    try:
+        for line in proc.stdout:
+            lines.append(line.rstrip("\n"))
+            print(f"  [nagrib2] {line.rstrip()}", flush=True)
+        proc.wait()
+    finally:
+        timer.cancel()
+
+    text = "\n".join(lines).strip()
+    if killed:
+        raise RuntimeError(
+            f"nagrib2 produced no more output for {timeout}s and was stopped.  It is "
+            "almost certainly sitting at a prompt waiting for an answer the input "
+            "deck does not give it -- the last [nagrib2] line above is the question.\n"
+            "  Run the GEMPAK step by hand, in a shell where GEMPAK works:\n"
+            f"    {nagrib2} < {deck_path or '(deck could not be written)'}\n"
+            "  That way you see the prompts and can answer them.  The converted\n"
+            f"  GRIB2 it is reading is ready at:\n    {grib}\n"
+        )
 
     def fail(reason: str) -> RuntimeError:
         return RuntimeError(
@@ -538,9 +595,8 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
             f"  nagrib2 output:\n    " + (text.replace("\n", "\n    ") or "(nothing)") +
             "\n  The regridded GRIB2 is still there and is ready for GEMPAK:\n"
             f"    {grib}\n"
-            "  To run the GEMPAK step by hand, source your GEMPAK environment and\n"
-            "  feed nagrib2 this:\n" +
-            "".join(f"    {ln}\n" for ln in script.splitlines())
+            "  To run the GEMPAK step by hand, source your GEMPAK environment and:\n"
+            f"    {nagrib2} < {deck_path or '(deck could not be written)'}\n"
         )
 
     # nagrib2 can exit 0 having written nothing, so the file is the real test.
@@ -695,6 +751,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="path to your GEMPAK environment script (Gemenviron.profile). "
                         "nagrib2 is then run inside a shell that sources it first -- use "
                         "this if GEMPAK only works in a shell where you have sourced it")
+    o.add_argument("--gempak-timeout", type=float, default=180.0, metavar="SECONDS",
+                   help="give up if nagrib2 goes this long without output (default 180). "
+                        "A GEMPAK program stuck at a prompt would otherwise hang forever")
     o.add_argument("--show-deck", action="store_true",
                    help="print the nagrib2 input deck, so you can run the GEMPAK step "
                         "by hand if your GEMPAK environment is awkward")
@@ -828,7 +887,8 @@ def main(argv: list[str] | None = None) -> int:
                     os.makedirs(os.path.dirname(os.path.abspath(gemfile)), exist_ok=True)
                     run_nagrib2(nagrib2, regridded, gemfile, args.maxgrd,
                                 args.g2tbls, args.overwrite_gem,
-                                gemenviron=args.gemenviron, show_deck=args.show_deck)
+                                gemenviron=args.gemenviron, show_deck=args.show_deck,
+                                timeout=args.gempak_timeout)
                     log(f"      -> {gemfile}")
                     if gemfile not in made:
                         made.append(gemfile)

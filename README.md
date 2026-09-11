@@ -259,6 +259,17 @@ the GRIB2 file that is already converted and waiting. Worst case the script's jo
 is "hand me a GEMPAK-ready GRIB2" and you drive `nagrib2` yourself; a fighting
 GEMPAK environment does not put the rest of the work out of reach.
 
+If it **hangs** instead of failing, that is a GEMPAK program sitting at a prompt
+waiting for an answer the deck does not contain. Two things handle that now:
+`nagrib2`'s output is echoed live (prefixed `[nagrib2]`) so the last line on
+screen is the question it is stuck on, and `--gempak-timeout` (default 180s)
+stops it rather than waiting forever. The deck is always written next to the
+GRIB2 as `<grib2>.nagrib2.deck`, so the manual route is one command:
+
+```bash
+nagrib2 < mrms_work/MultiSensor_QPE_24H_Pass2_00.00_20260909-120000_native.grib2.nagrib2.deck
+```
+
 `nagrib2` can exit 0 having written nothing — a navigation mismatch or a
 parameter it cannot name both do that quietly. The script stats the output file
 before and after and treats "exited cleanly but did not change the file" as a
