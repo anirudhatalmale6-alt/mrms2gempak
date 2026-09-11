@@ -104,6 +104,30 @@ def find_exe(name: str, env_var: str | None = None, hint: str = "") -> str:
     raise RuntimeError(f"{name} not found on PATH. {hint}")
 
 
+def parse_duration(text: str) -> str:
+    """
+    Accept an accumulation length written any reasonable way.
+
+    "6", "6h", "6H", "06", "06H", "6hr", "6 hour" all mean the same thing, and
+    there is no reason to make someone remember that the bucket spells it 06H.
+    """
+    cleaned = text.strip().lower().replace("hour", "").replace("hr", "").replace("h", "").strip()
+    try:
+        hours = int(cleaned)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"cannot read {text!r} as an accumulation length; "
+            f"use one of {', '.join(sorted(DURATION_HOURS))}"
+        ) from None
+    key = f"{hours:02d}H"
+    if key not in DURATION_HOURS:
+        raise argparse.ArgumentTypeError(
+            f"MRMS has no {hours}-hour QPE product; available: "
+            f"{', '.join(sorted(DURATION_HOURS))}"
+        )
+    return key
+
+
 def normalise_clip(text: str) -> str:
     """
     Accept a clip box written any sensible way and return it as
@@ -495,9 +519,11 @@ def main(argv: list[str] | None = None) -> int:
               ./mrms2gem.py --duration 24H --start 2026-09-09 --list-only
             """),
     )
-    p.add_argument("--duration", action="append", default=[],
-                   choices=sorted(DURATION_HOURS), metavar="01H|03H|06H|12H|24H|48H|72H",
-                   help="accumulation length; repeat for several (default 24H)")
+    p.add_argument("--duration", action="append", default=[], type=parse_duration,
+                   metavar="06H|12H|24H|...",
+                   help="accumulation length: 01H 03H 06H 12H 24H 48H 72H. "
+                        "Plain numbers are fine too (--duration 6). Repeat the option "
+                        "for several in one run (default 24H)")
     p.add_argument("--pass", dest="qpe_pass", type=int, default=2, choices=(1, 2),
                    help="MRMS QPE pass (default 2, the gauge-corrected one)")
     p.add_argument("--source", default="MultiSensor", choices=("MultiSensor", "RadarOnly"))

@@ -183,7 +183,7 @@ with negative rainfall in it.
 
 | option | default | notes |
 | --- | --- | --- |
-| `--duration` | `24H` | repeatable: `01H 03H 06H 12H 24H 48H 72H` |
+| `--duration` | `24H` | `01H 03H 06H 12H 24H 48H 72H`; plain numbers work too (`--duration 6`). Repeatable |
 | `--pass` | `2` | Pass 2 is the gauge-corrected one |
 | `--source` | `MultiSensor` | or `RadarOnly` |
 | `--step` | `1` | hours between valid times |
