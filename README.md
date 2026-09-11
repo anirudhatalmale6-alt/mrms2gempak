@@ -259,12 +259,34 @@ the GRIB2 file that is already converted and waiting. Worst case the script's jo
 is "hand me a GEMPAK-ready GRIB2" and you drive `nagrib2` yourself; a fighting
 GEMPAK environment does not put the rest of the work out of reach.
 
-If it **hangs** instead of failing, that is a GEMPAK program sitting at a prompt
-waiting for an answer the deck does not contain. Two things handle that now:
-`nagrib2`'s output is echoed live (prefixed `[nagrib2]`) so the last line on
-screen is the question it is stuck on, and `--gempak-timeout` (default 180s)
-stops it rather than waiting forever. The deck is always written next to the
-GRIB2 as `<grib2>.nagrib2.deck`, so the manual route is one command:
+**nagrib2 does not exit when fed from a pipe.** Observed on GEMPAK 7 with
+nagrib2 v3.0.2-era tables: it processes the deck, prints its report, returns to
+`GEMPAK-NAGRIB2>` and sits there — `exit` at the end of the deck does not end it,
+and without intervention the run never returns. So the script does not wait for
+it to exit. It watches for
+
+```
+         1 grids were written to the GEMPAK file:
+```
+
+which is nagrib2 announcing the work is done, allows three seconds for trailing
+output, then closes it down. That line is also how success is judged, rather than
+by exit status or file timestamps:
+
+| nagrib2 says | treated as |
+| --- | --- |
+| `N grids were written`, N > 0 | success, count logged |
+| `0 grids were written` + `[GD -10] Grid already exists.` | success — the grid is already in the file; `--overwrite-gem` to replace it |
+| `0 grids were written`, nothing about existing | failure, with the output and the deck |
+| no report at all | falls back to checking the file changed |
+
+That second row is the one that looks alarming and is not: re-running the same
+time is a no-op because `OVERWR=NO`, and the desired grid is present either way.
+
+Output is echoed live (prefixed `[nagrib2]`) so if it does stop somewhere
+unexpected, the last line on screen is the prompt it is stuck on, and
+`--gempak-timeout` (default 180s) is the backstop. The deck is always written
+next to the GRIB2 as `<grib2>.nagrib2.deck`, so the manual route is one command:
 
 ```bash
 nagrib2 < mrms_work/MultiSensor_QPE_24H_Pass2_00.00_20260909-120000_native.grib2.nagrib2.deck
@@ -468,6 +490,10 @@ Verified by running it, against real files from the bucket:
   `-undefine_val` removed in turn, and several at once
 * the `-rpn dup:-0.001:>=:mask` fallback, which flags the same 1,512,918 points
   and reaches the same minimum as `-undefine_val` on a real CONUS file
+* the GEMPAK stage against stand-ins built from a real nagrib2 transcript,
+  including the one that writes nothing because the grid already exists and then
+  sits at its prompt: the run now finishes in ~8s instead of hanging, and the
+  three zero/non-zero/no-report cases are told apart
 * the GEMPAK stage against a stand-in `nagrib2`: `--gemenviron` really does
   source the environment (and the same run without it really does not — both
   directions checked), sourcing noise stays out of the reported output, and a

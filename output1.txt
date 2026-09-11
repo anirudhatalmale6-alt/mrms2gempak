@@ -1,0 +1,67 @@
+nmarsili@localhost mrms2gempak]$ python3 mrms2gem.py --duration 24H --valid 2026-09-09T12 --native --clip=-105:-90:35:45 --gemfile ~/mrms_{dur}_%Y%m%d.gem
+[mrms2gem] 1 valid time(s) x 1 duration(s)
+[mrms2gem] wgrib2: v3.0.2 3/2021  Wesley Ebisuzaki
+[mrms2gem] wgrib2 does not have: -set_ftime_mode -- working around where possible
+[mrms2gem] clipping MRMS to 255.0000:270.0000:35.0000:45.0000 (native resolution)
+[mrms2gem]   that box is roughly 1501 x 1001, about 1.50M MRMS points
+[mrms2gem] OK    MultiSensor_QPE_24H_Pass2_00.00 2026-09-09 12:00Z: 1,500,000 pts -> 1,500,000 pts, masked 0, mean 4.763 -> 4.763 mm, max 159.7 -> 159.7 mm
+  [nagrib2]  GBFILE    GRIB data file name               ./mrms_work/MultiSensor_QPE_24H_Pass2_00.00_20260904-120000_native.grib2
+  [nagrib2]  GDOUTF    Output grid file                  /home/nmarsili/mrms_24h_20260904.gem
+  [nagrib2]  PROJ      Map projection/angles/margins|dr
+  [nagrib2]  GRDAREA   Area covered by grid
+  [nagrib2]  KXKY      Number of grid points in x;y
+  [nagrib2]  MAXGRD    Maximum number of grids           2000
+  [nagrib2]  CPYFIL    Grid file whose navigation is to  gds
+  [nagrib2]  GAREA     Graphics area                     grid
+  [nagrib2]  OUTPUT    Output device/filename            T
+  [nagrib2]  G2TBLS    Input GRIB2 decoding tables
+  [nagrib2]  G2DIAG    GRIB2 diagnostic elements
+  [nagrib2]  OVERWR    Overwr flag                       NO
+  [nagrib2]  PDSEXT    Y or N, add PDS extension if fou  NO
+  [nagrib2]  Parameters requested: GBFILE,GDOUTF,PROJ,GRDAREA,KXKY,MAXGRD,CPYFIL,GAREA,
+  [nagrib2]  OUTPUT,G2TBLS,G2DIAG,OVERWR,PDSEXT.
+  [nagrib2]  GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> GEMPAK-NAGRIB2> Opening WMO Originating Center Table wmocenter.tbl...
+  [nagrib2]  Opening WMO GRIB2 Parameter Table g2varswmo2.tbl...
+  [nagrib2]  Opening WMO GRIB2 Vertical Coordinate Table g2vcrdwmo2.tbl...
+  [nagrib2] Opening the GEMPAK grid file
+  [nagrib2] GEMPAK grid file is ready...
+  [nagrib2]  [GD -10]  Grid already exists.
+  [nagrib2] 
+  [nagrib2]  GRID FILE: /home/nmarsili/mrms_24h_20260909.gem
+  [nagrib2] 
+  [nagrib2]  GRID NAVIGATION:
+  [nagrib2]      PROJECTION:          CED
+  [nagrib2]      ANGLES:                 0.0     0.0     0.0
+  [nagrib2]      GRID SIZE:         15001000
+  [nagrib2]      LL CORNER:              35.01   -105.00
+  [nagrib2]      UR CORNER:              44.99    -90.01
+  [nagrib2] 
+  [nagrib2]  GRID ANALYSIS BLOCK:
+  [nagrib2]      ANALYSIS TYPE:        BARNES
+  [nagrib2]      DELTAN:               4.000
+  [nagrib2]      DELTAX:           -9999.000
+  [nagrib2]      DELTAY:           -9999.000
+  [nagrib2]      GRID AREA:            34.00 -106.00   46.00  -89.00
+  [nagrib2]      EXTEND AREA:          34.00 -106.00   46.00  -89.00
+  [nagrib2]      DATA AREA:            34.00 -106.00   46.00  -89.00
+  [nagrib2] 
+  [nagrib2]  Number of grids in file:     1
+  [nagrib2] 
+  [nagrib2]  Maximum number of grids in file:   2000
+  [nagrib2] 
+  [nagrib2]  First time in file: 260908/1200F024
+  [nagrib2]  Last  time in file: 260908/1200F024
+  [nagrib2] 
+  [nagrib2] 
+  [nagrib2] 
+  [nagrib2]          1 GRIB messages were read or scanned from the GRIB file:
+  [nagrib2]      ./mrms_work/MultiSensor_QPE_24H_Pass2_00.00_20260909-120000_native.grib2
+  [nagrib2] 
+  [nagrib2]          0 grids were written to the GEMPAK file:
+  [nagrib2]                                          /home/nmarsili/mrms_24h_20260909.gem
+  [nagrib2] 
+  [nagrib2]  Parameters requested: GBFILE,GDOUTF,PROJ,GRDAREA,KXKY,MAXGRD,CPYFIL,GAREA,
+  [nagrib2]  OUTPUT,G2TBLS,G2DIAG,OVERWR,PDSEXT.
+  
+  ----------------------
+

@@ -562,6 +562,7 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
         pass                        # it exited before reading the deck; output says why
 
     killed: list[bool] = []
+    finished: list[int] = []        # grids written, once nagrib2 reports it
 
     def give_up() -> None:
         killed.append(True)
@@ -569,25 +570,28 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
 
     timer = threading.Timer(timeout, give_up)
     timer.start()
+    finisher: threading.Timer | None = None
     try:
         for line in proc.stdout:
             lines.append(line.rstrip("\n"))
             print(f"  [nagrib2] {line.rstrip()}", flush=True)
+            # nagrib2 reports "N grids were written to the GEMPAK file" and its
+            # work is done at that point -- but it then returns to its own prompt
+            # and, fed from a pipe, sits there rather than acting on "exit".  So
+            # take the report as completion, allow a moment for any trailing lines,
+            # and close it down ourselves instead of waiting for a timeout.
+            m = re.search(r"(\d+)\s+grids?\s+were\s+written", line)
+            if m and not finished:
+                finished.append(int(m.group(1)))
+                finisher = threading.Timer(3.0, proc.kill)
+                finisher.start()
         proc.wait()
     finally:
         timer.cancel()
+        if finisher:
+            finisher.cancel()
 
     text = "\n".join(lines).strip()
-    if killed:
-        raise RuntimeError(
-            f"nagrib2 produced no more output for {timeout}s and was stopped.  It is "
-            "almost certainly sitting at a prompt waiting for an answer the input "
-            "deck does not give it -- the last [nagrib2] line above is the question.\n"
-            "  Run the GEMPAK step by hand, in a shell where GEMPAK works:\n"
-            f"    {nagrib2} < {deck_path or '(deck could not be written)'}\n"
-            "  That way you see the prompts and can answer them.  The converted\n"
-            f"  GRIB2 it is reading is ready at:\n    {grib}\n"
-        )
 
     def fail(reason: str) -> RuntimeError:
         return RuntimeError(
@@ -599,7 +603,33 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
             f"    {nagrib2} < {deck_path or '(deck could not be written)'}\n"
         )
 
-    # nagrib2 can exit 0 having written nothing, so the file is the real test.
+    if finished:
+        written = finished[0]
+        if written > 0:
+            log(f"      nagrib2 wrote {written} grid(s)")
+            return text
+        # Zero written has two very different causes and they must not be
+        # conflated: the grid being there already is the desired end state, while
+        # anything else means nothing landed.
+        if re.search(r"grid already exists", text, re.I):
+            log("      that grid is already in the file, so nothing was rewritten "
+                "(pass --overwrite-gem to replace it)")
+            return text
+        raise fail("nagrib2 read the GRIB2 but wrote 0 grids to the GEMPAK file")
+
+    if killed:
+        raise RuntimeError(
+            f"nagrib2 produced no more output for {timeout}s and was stopped.  It is "
+            "almost certainly sitting at a prompt waiting for an answer the input "
+            "deck does not give it -- the last [nagrib2] line above is the question.\n"
+            "  Run the GEMPAK step by hand, in a shell where GEMPAK works:\n"
+            f"    {nagrib2} < {deck_path or '(deck could not be written)'}\n"
+            "  That way you see the prompts and can answer them.  The converted\n"
+            f"  GRIB2 it is reading is ready at:\n    {grib}\n"
+        )
+
+    # Reached only when nagrib2 never printed its "N grids were written" report,
+    # e.g. an older GEMPAK with different wording.  Fall back to the file itself.
     if proc.returncode != 0:
         raise fail(f"nagrib2 exited {proc.returncode} for {grib}")
     if not os.path.exists(gemfile):
