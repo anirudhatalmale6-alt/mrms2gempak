@@ -283,6 +283,12 @@ by exit status or file timestamps:
 That second row is the one that looks alarming and is not: re-running the same
 time is a no-op because `OVERWR=NO`, and the desired grid is present either way.
 
+The last line of every run is `[mrms2gem] done`. If you see that, the script has
+finished and returned to the shell — anything still appearing to hang after it is
+not this script. nagrib2 is started in its own process group and killed as a
+group, and both watchdog timers are daemon threads, so neither a surviving child
+holding the pipe open nor a stray timer can keep the run alive.
+
 Output is echoed live (prefixed `[nagrib2]`) so if it does stop somewhere
 unexpected, the last line on screen is the prompt it is stuck on, and
 `--gempak-timeout` (default 180s) is the backstop. The deck is always written

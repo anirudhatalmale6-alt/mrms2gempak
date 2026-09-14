@@ -51,6 +51,7 @@ import datetime as dt
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -552,9 +553,24 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
     # and no way to tell what it is waiting for.  Echoing every line means the
     # last thing printed is the question it is stuck on.
     lines: list[str] = []
+    # start_new_session puts nagrib2 in its own process group, so that when we shut
+    # it down we can take any child it spawned with it.  A survivor holding the
+    # other end of the stdout pipe would keep the read below from ever returning.
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            start_new_session=True)
     assert proc.stdin and proc.stdout
+
+    def shut_down() -> None:
+        """Kill the whole process group, falling back to the process alone."""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
     try:
         proc.stdin.write(script)
         proc.stdin.close()          # EOF, so nagrib2 knows there is no more input
@@ -566,9 +582,12 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
 
     def give_up() -> None:
         killed.append(True)
-        proc.kill()
+        shut_down()
 
+    # daemon=True on both timers: a stray timer thread must never be the reason
+    # the script itself fails to return to the shell.
     timer = threading.Timer(timeout, give_up)
+    timer.daemon = True
     timer.start()
     finisher: threading.Timer | None = None
     try:
@@ -583,13 +602,25 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
             m = re.search(r"(\d+)\s+grids?\s+were\s+written", line)
             if m and not finished:
                 finished.append(int(m.group(1)))
-                finisher = threading.Timer(3.0, proc.kill)
+                finisher = threading.Timer(3.0, shut_down)
+                finisher.daemon = True
                 finisher.start()
-        proc.wait()
     finally:
         timer.cancel()
         if finisher:
             finisher.cancel()
+        # Whatever happened above -- normal end, exception, Ctrl-C -- nagrib2 must
+        # not outlive this function, and the pipe must be closed, or the script
+        # will not return to the shell.
+        shut_down()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
 
     text = "\n".join(lines).strip()
 
@@ -605,6 +636,12 @@ def run_nagrib2(nagrib2: str, grib: str, gemfile: str, maxgrd: int,
 
     if finished:
         written = finished[0]
+        # nagrib2's own report is the verdict, but it is still a claim about a file
+        # -- check the file is actually there before believing any of it.
+        if not os.path.exists(gemfile):
+            raise fail(f"nagrib2 reported on {written} grid(s) but {gemfile} does not exist")
+        if os.path.getsize(gemfile) == 0:
+            raise fail(f"nagrib2 reported on {written} grid(s) but {gemfile} is empty")
         if written > 0:
             log(f"      nagrib2 wrote {written} grid(s)")
             return text
@@ -932,7 +969,12 @@ def main(argv: list[str] | None = None) -> int:
         log("gem file(s): " + ", ".join(made))
     if failures:
         log(f"{len(failures)} of {len(times) * len(args.duration)} failed: " + "; ".join(failures))
+        log("done")
         return 1
+    # An explicit marker: if you see this line the script has finished all its
+    # work and is returning to the shell.  Anything that appears to hang after it
+    # is not this script.
+    log("done")
     return 0
 
 
