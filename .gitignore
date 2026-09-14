@@ -4,3 +4,4 @@ mrms_work/
 *.grib2
 *.grib2.gz
 *.gem
+output*.txt
